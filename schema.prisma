@@ -1,0 +1,482 @@
+// backend/prisma/schema.prisma - Database Schema
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════════════════
+// USER & AUTHENTICATION
+// ═══════════════════════════════════════════════════════
+
+model User {
+  id                     String    @id @default(uuid())
+  email                  String    @unique
+  passwordHash           String
+  firstName              String
+  lastName               String
+  phone                  String?
+  accountType            AccountType
+  role                   UserRole  @default(user)
+  isVerified             Boolean   @default(false)
+  isActive               Boolean   @default(true)
+  stripeCustomerId       String?   @unique
+  
+  // Email verification
+  verificationToken      String?
+  verificationExpires    DateTime?
+  
+  // Password reset
+  passwordResetToken     String?
+  passwordResetExpires   DateTime?
+  
+  // Timestamps
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  lastLoginAt            DateTime?
+  
+  // Relations
+  cases                  Case[]
+  payments               Payment[]
+  refreshTokens          RefreshToken[]
+  loginAttempts          LoginAttempt[]
+  aiApiCalls             AiApiCall[]
+  apiKeys                ApiKey[]
+  documents              Document[]
+  
+  @@index([email])
+  @@map("users")
+}
+
+enum AccountType {
+  individual
+  business
+  law_firm
+  mediator
+}
+
+enum UserRole {
+  user
+  mediator
+  arbitrator
+  admin
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  token      String    @unique
+  expiresAt  DateTime
+  revoked    Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+  
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+model LoginAttempt {
+  id         String    @id @default(uuid())
+  userId     String
+  success    Boolean
+  ipAddress  String
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([createdAt])
+  @@map("login_attempts")
+}
+
+// ═══════════════════════════════════════════════════════
+// CASES & DISPUTES
+// ═══════════════════════════════════════════════════════
+
+model Case {
+  id                   String        @id @default(uuid())
+  caseNumber           String        @unique
+  userId               String
+  
+  // Case details
+  title                String
+  category             CaseCategory
+  description          String        @db.Text
+  claimAmount          Decimal?      @db.Decimal(15, 2)
+  resolutionType       ResolutionType
+  language             String        @default("english")
+  
+  // Parties
+  claimantName         String
+  claimantEmail        String
+  claimantPhone        String?
+  respondentName       String
+  respondentEmail      String?
+  respondentPhone      String?
+  
+  // Status
+  status               CaseStatus    @default(draft)
+  paymentStatus        PaymentStatus @default(pending)
+  
+  // Timestamps
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  submittedAt          DateTime?
+  paidAt               DateTime?
+  closedAt             DateTime?
+  
+  // Relations
+  user                 User          @relation(fields: [userId], references: [id])
+  payments             Payment[]
+  documents            Document[]
+  aiReports            AiReport[]
+  hearings             Hearing[]
+  
+  @@index([userId])
+  @@index([caseNumber])
+  @@index([status])
+  @@index([createdAt])
+  @@map("cases")
+}
+
+enum CaseCategory {
+  contract
+  payment
+  consumer
+  employment
+  real_estate
+  ip
+  ecommerce
+  cross_border
+}
+
+enum ResolutionType {
+  mediation
+  arbitration
+  conciliation
+  consultation
+}
+
+enum CaseStatus {
+  draft
+  pending_payment
+  active
+  in_hearing
+  resolved
+  closed
+  cancelled
+}
+
+enum PaymentStatus {
+  pending
+  paid
+  refunded
+  failed
+}
+
+model Document {
+  id            String    @id @default(uuid())
+  caseId        String
+  userId        String
+  
+  // File details
+  fileName      String
+  fileType      String
+  fileSize      Int
+  fileUrl       String
+  s3Key         String?
+  
+  // Metadata
+  uploadedBy    String
+  description   String?
+  
+  // Timestamps
+  uploadedAt    DateTime  @default(now())
+  
+  // Relations
+  case          Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  user          User      @relation(fields: [userId], references: [id])
+  
+  @@index([caseId])
+  @@index([userId])
+  @@map("documents")
+}
+
+model Hearing {
+  id              String    @id @default(uuid())
+  caseId          String
+  
+  // Hearing details
+  scheduledAt     DateTime
+  duration        Int       // minutes
+  meetingUrl      String?
+  status          HearingStatus @default(scheduled)
+  notes           String?   @db.Text
+  
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  completedAt     DateTime?
+  
+  // Relations
+  case            Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  @@index([caseId])
+  @@index([scheduledAt])
+  @@map("hearings")
+}
+
+enum HearingStatus {
+  scheduled
+  in_progress
+  completed
+  cancelled
+}
+
+// ═══════════════════════════════════════════════════════
+// PAYMENTS
+// ═══════════════════════════════════════════════════════
+
+model Payment {
+  id                      String    @id @default(uuid())
+  userId                  String
+  caseId                  String
+  
+  // Payment details
+  amount                  Int       // Amount in smallest currency unit (paise)
+  currency                String    @default("inr")
+  status                  String
+  
+  // Stripe details
+  stripePaymentIntentId   String    @unique
+  stripeChargeId          String?
+  
+  // Refund details
+  refundAmount            Int?
+  refundReason            String?
+  refundedAt              DateTime?
+  
+  // Error tracking
+  error                   String?
+  
+  // Timestamps
+  createdAt               DateTime  @default(now())
+  paidAt                  DateTime?
+  
+  // Relations
+  user                    User      @relation(fields: [userId], references: [id])
+  case                    Case      @relation(fields: [caseId], references: [id])
+  
+  @@index([userId])
+  @@index([caseId])
+  @@index([stripePaymentIntentId])
+  @@map("payments")
+}
+
+// ═══════════════════════════════════════════════════════
+// AI INTEGRATION
+// ═══════════════════════════════════════════════════════
+
+model AiApiCall {
+  id          String    @id @default(uuid())
+  userId      String
+  
+  // Request details
+  model       String
+  prompt      String    @db.Text
+  context     String?   @db.Text
+  
+  // Response details
+  response    String?   @db.Text
+  tokensUsed  Int?
+  error       String?
+  success     Boolean   @default(false)
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  
+  // Relations
+  user        User      @relation(fields: [userId], references: [id])
+  
+  @@index([userId])
+  @@index([createdAt])
+  @@map("ai_api_calls")
+}
+
+model AiReport {
+  id                String    @id @default(uuid())
+  caseId            String
+  
+  // Report type
+  reportType        ReportType
+  
+  // Report content
+  content           String    @db.Text
+  summary           String?   @db.Text
+  recommendations   String?   @db.Text
+  
+  // Timestamps
+  generatedAt       DateTime  @default(now())
+  
+  // Relations
+  case              Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  
+  @@index([caseId])
+  @@map("ai_reports")
+}
+
+enum ReportType {
+  company
+  client
+  platform_summary
+}
+
+// ═══════════════════════════════════════════════════════
+// API MANAGEMENT
+// ═══════════════════════════════════════════════════════
+
+model ApiKey {
+  id              String    @id @default(uuid())
+  userId          String
+  
+  // Key details
+  name            String
+  keyHash         String    @unique  // SHA-256 hash of actual key
+  isActive        Boolean   @default(true)
+  
+  // Rate limiting
+  rateLimit       Int?      // Requests per window
+  rateLimitWindow Int?      // Window in seconds
+  
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  lastUsedAt      DateTime?
+  expiresAt       DateTime?
+  
+  // Relations
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  requests        ApiRequest[]
+  
+  @@index([userId])
+  @@index([keyHash])
+  @@map("api_keys")
+}
+
+model ApiRequest {
+  id          String    @id @default(uuid())
+  apiKeyId    String
+  
+  // Request details
+  endpoint    String
+  method      String
+  ipAddress   String
+  userAgent   String?
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  
+  // Relations
+  apiKey      ApiKey    @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  
+  @@index([apiKeyId])
+  @@index([createdAt])
+  @@map("api_requests")
+}
+
+// ═══════════════════════════════════════════════════════
+// CONTENT MANAGEMENT
+// ═══════════════════════════════════════════════════════
+
+model BlogPost {
+  id          String    @id @default(uuid())
+  
+  // Content
+  title       String
+  slug        String    @unique
+  excerpt     String    @db.Text
+  content     String    @db.Text
+  category    String
+  emoji       String?
+  
+  // AI metadata
+  generatedBy String    @default("ai")
+  topic       String?
+  
+  // SEO
+  metaTitle   String?
+  metaDesc    String?
+  
+  // Status
+  published   Boolean   @default(true)
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([slug])
+  @@index([published])
+  @@map("blog_posts")
+}
+
+model ContactMessage {
+  id          String    @id @default(uuid())
+  
+  // Sender details
+  name        String
+  email       String
+  phone       String?
+  subject     String
+  message     String    @db.Text
+  
+  // Status
+  status      MessageStatus @default(new)
+  assignedTo  String?
+  response    String?   @db.Text
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  respondedAt DateTime?
+  
+  @@index([status])
+  @@index([createdAt])
+  @@map("contact_messages")
+}
+
+enum MessageStatus {
+  new
+  in_progress
+  responded
+  closed
+}
+
+// ═══════════════════════════════════════════════════════
+// AUDIT & COMPLIANCE
+// ═══════════════════════════════════════════════════════
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  
+  // Actor
+  userId      String?
+  ipAddress   String
+  userAgent   String?
+  
+  // Action
+  action      String
+  resource    String
+  resourceId  String?
+  changes     String?   @db.Text
+  
+  // Timestamp
+  createdAt   DateTime  @default(now())
+  
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
